@@ -4,7 +4,7 @@ import { LoginPage } from '../../../pages/loginPage';
 import { Navigation } from '../../../pages/navigation';
 import { TransferPage } from '../../../pages/transferPage';
 import { Disclaimer } from '../../../pages/disclaimer';
-import { transferData, validUser, exactBalanceUser } from '../../../test-data/users';
+import { transferData, validUser, exactBalanceUser, sqlInjectionUser } from '../../../test-data/users';
 
 import {
   getUserBalance,
@@ -646,6 +646,548 @@ test('user can transfer their balance while retaining 0.01', async ({ page }) =>
   );
   expect(transactionCount).toBe(1);
 });
+
+
+test('transfer amount rejects more than two decimal places', async ({ page }) => {
+  const loginPage = new LoginPage(page);
+  const navigation = new Navigation(page);
+  const transferPage = new TransferPage(page);
+  const disclaimer = new Disclaimer(page);
+
+  await loginPage.goto();
+  await loginPage.login(validUser.username, validUser.password);
+  await disclaimer.acknowledge();
+
+  await navigation.goToMoneyTransfer();
+  await expect(transferPage.transferSection).toBeVisible();
+
+  // Safety net: prevent an unexpected transfer from reaching the backend.
+  let transferRequestObserved = false;
+
+  await page.route('**/transfer', async (route) => {
+    if (route.request().method() === 'POST') {
+      transferRequestObserved = true;
+
+      await route.fulfill({
+        status: 400,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          status: 'error',
+          message: 'Request blocked by test interception',
+        }),
+      });
+      return;
+    }
+
+    await route.continue();
+  });
+
+  await transferPage.recipientAccountInput.fill(
+    transferData.recipientAccount
+  );
+
+  // Enter the amount character by character so the video captures it.
+  await transferPage.amountInput.click();
+  await transferPage.amountInput.fill('');
+
+
+  await transferPage.amountInput.pressSequentially('10.123', {
+    delay: 250,
+  });
+
+  await page.waitForTimeout(1000);
+
+  const validity = await transferPage.amountInput.evaluate(
+    (element: HTMLInputElement) => ({
+      value: element.value,
+      valid: element.validity.valid,
+      stepMismatch: element.validity.stepMismatch,
+    })
+  );
+
+  await page.evaluate(() => {
+  const form = document.querySelector<HTMLFormElement>('#transferForm');
+
+  if (!form) {
+    throw new Error('Transfer form was not found');
+  }
+
+  (window as Window & { transferSubmitObserved?: boolean })
+    .transferSubmitObserved = false;
+
+  form.addEventListener('submit', () => {
+    (window as Window & { transferSubmitObserved?: boolean })
+      .transferSubmitObserved = true;
+  });
+  });
+
+  expect(validity.value).toBe('10.123');
+  expect(validity.valid).toBe(false);
+  expect(validity.stepMismatch).toBe(true);
+
+
+  await transferPage.sendMoneyButton.click();
+
+  await transferPage.sendMoneyButton.click();
+
+  const submitEventObserved = await page.evaluate(
+    () =>
+      (window as Window & { transferSubmitObserved?: boolean })
+        .transferSubmitObserved
+  );
+
+  expect(submitEventObserved).toBe(false);
+
+  const submissionEvidence = await transferPage.amountInput.evaluate(
+    (element: HTMLInputElement) => ({
+      validationMessage: element.validationMessage,
+      valid: element.validity.valid,
+      stepMismatch: element.validity.stepMismatch,
+    })
+  );
+
+  expect(transferRequestObserved).toBe(false);
+  expect(submissionEvidence.valid).toBe(false);
+  expect(submissionEvidence.stepMismatch).toBe(true);
+  expect(submissionEvidence.validationMessage).toBeTruthy();
+});
+
+
+test('transfer is blocked when recipient account is empty', async ({ page }) => {
+  const loginPage = new LoginPage(page);
+  const navigation = new Navigation(page);
+  const transferPage = new TransferPage(page);
+  const disclaimer = new Disclaimer(page);
+
+  await loginPage.goto();
+  await loginPage.login(validUser.username, validUser.password);
+  await disclaimer.acknowledge();
+
+  await navigation.goToMoneyTransfer();
+  await expect(transferPage.transferSection).toBeVisible();
+
+  let transferRequestObserved = false;
+
+  await page.route('**/transfer', async (route) => {
+    if (route.request().method() === 'POST') {
+      transferRequestObserved = true;
+      await route.fulfill({
+        status: 400,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          status: 'error',
+          message: 'Request blocked by test interception',
+        }),
+      });
+      return;
+    }
+
+    await route.continue();
+  });
+
+  // Keep the amount valid and clear the required recipient.
+  await transferPage.amountInput.fill('10');
+  await transferPage.recipientAccountInput.fill('');
+
+  // Observe whether the form's submit event fires.
+  await page.evaluate(() => {
+    const form = document.querySelector<HTMLFormElement>('#transferForm');
+
+    if (!form) {
+      throw new Error('Transfer form was not found');
+    }
+
+    (window as Window & { transferSubmitObserved?: boolean })
+      .transferSubmitObserved = false;
+
+    form.addEventListener('submit', () => {
+      (window as Window & { transferSubmitObserved?: boolean })
+        .transferSubmitObserved = true;
+    });
+  });
+
+  await transferPage.sendMoneyButton.scrollIntoViewIfNeeded();
+  await expect(transferPage.sendMoneyButton).toBeVisible();
+  await page.waitForTimeout(500);
+  await transferPage.sendMoneyButton.click();
+  // Allow the browser's native validation tooltip to appear in the recording.
+  await page.waitForTimeout(1500);
+
+  const evidence = await transferPage.recipientAccountInput.evaluate(
+    (element: HTMLInputElement) => ({
+      value: element.value,
+      valid: element.validity.valid,
+      valueMissing: element.validity.valueMissing,
+      validationMessage: element.validationMessage,
+    })
+  );
+
+  const submitEventObserved = await page.evaluate(
+    () =>
+      (window as Window & { transferSubmitObserved?: boolean })
+        .transferSubmitObserved
+  );
+
+  console.log('Empty recipient validation evidence:', {
+    ...evidence,
+    submitEventObserved,
+    transferRequestObserved,
+  });
+
+  expect(evidence.value).toBe('');
+  expect(evidence.valid).toBe(false);
+  expect(evidence.valueMissing).toBe(true);
+  expect(evidence.validationMessage).toBeTruthy();
+  expect(submitEventObserved).toBe(false);
+  expect(transferRequestObserved).toBe(false);
+});
+
+
+test('transfer is blocked when amount is empty', async ({ page }) => {
+  const loginPage = new LoginPage(page);
+  const navigation = new Navigation(page);
+  const transferPage = new TransferPage(page);
+  const disclaimer = new Disclaimer(page);
+
+  await loginPage.goto();
+  await loginPage.login(validUser.username, validUser.password);
+  await disclaimer.acknowledge();
+
+  await navigation.goToMoneyTransfer();
+  await expect(transferPage.transferSection).toBeVisible();
+
+  let transferRequestObserved = false;
+
+  await page.route('**/transfer', async (route) => {
+    if (route.request().method() === 'POST') {
+      transferRequestObserved = true;
+      await route.fulfill({
+        status: 400,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          status: 'error',
+          message: 'Request blocked by test interception',
+        }),
+      });
+      return;
+    }
+
+    await route.continue();
+  });
+
+  // Keep the recipient populated and clear the required amount.
+  await transferPage.recipientAccountInput.fill(
+    transferData.recipientAccount
+  );
+  await transferPage.amountInput.fill('');
+
+  // Observe whether the form's submit event fires.
+  await page.evaluate(() => {
+    const form = document.querySelector<HTMLFormElement>('#transferForm');
+
+    if (!form) {
+      throw new Error('Transfer form was not found');
+    }
+
+    (window as Window & { transferSubmitObserved?: boolean })
+      .transferSubmitObserved = false;
+
+    form.addEventListener('submit', () => {
+      (window as Window & { transferSubmitObserved?: boolean })
+        .transferSubmitObserved = true;
+    });
+  });
+
+  await transferPage.sendMoneyButton.scrollIntoViewIfNeeded();
+  await expect(transferPage.sendMoneyButton).toBeVisible();
+  await page.waitForTimeout(500);
+  await transferPage.sendMoneyButton.click();
+  // Allow the browser's native validation tooltip to appear in the recording.
+  await page.waitForTimeout(1500);
+
+  const evidence = await transferPage.amountInput.evaluate(
+    (element: HTMLInputElement) => ({
+      value: element.value,
+      valid: element.validity.valid,
+      valueMissing: element.validity.valueMissing,
+      validationMessage: element.validationMessage,
+    })
+  );
+
+  const submitEventObserved = await page.evaluate(
+    () =>
+      (window as Window & { transferSubmitObserved?: boolean })
+        .transferSubmitObserved
+  );
+
+  console.log('Empty amount validation evidence:', {
+    ...evidence,
+    submitEventObserved,
+    transferRequestObserved,
+  });
+
+  expect(evidence.value).toBe('');
+  expect(evidence.valid).toBe(false);
+  expect(evidence.valueMissing).toBe(true);
+  expect(evidence.validationMessage).toBeTruthy();
+  expect(submitEventObserved).toBe(false);
+  expect(transferRequestObserved).toBe(false);
+});
+
+
+test('user can successfully transfer money without a description', async ({ page }) => {
+  const loginPage = new LoginPage(page);
+  const navigation = new Navigation(page);
+  const transferPage = new TransferPage(page);
+  const disclaimer = new Disclaimer(page);
+
+  await loginPage.goto();
+  await loginPage.login(validUser.username, validUser.password);
+  await disclaimer.acknowledge();
+
+  const uiBalanceBefore = Number(
+    (await transferPage.balance.textContent())!.replace('$', '')
+  );
+
+  const dbBalanceBefore = await getUserBalance(
+    validUser.accountNumber
+  );
+
+  const recipientBalanceBefore = await getUserBalance(
+    transferData.recipientAccount
+  );
+
+  expect(uiBalanceBefore).toBe(dbBalanceBefore);
+
+  await navigation.goToMoneyTransfer();
+  await expect(transferPage.transferSection).toBeVisible();
+
+  // Leave the optional description empty.
+  await transferPage.sendMoney(
+    transferData.recipientAccount,
+    transferData.amount,
+    ''
+  );
+
+  await expect(transferPage.transferSuccessToast).toBeVisible();
+
+  const uiBalanceAfter = Number(
+    (await transferPage.balance.textContent())!.replace('$', '')
+  );
+
+  const dbBalanceAfter = await getUserBalance(
+    validUser.accountNumber
+  );
+
+  const recipientBalanceAfter = await getUserBalance(
+    transferData.recipientAccount
+  );
+
+  expect(uiBalanceAfter).toBe(
+    uiBalanceBefore - transferData.amount
+  );
+
+  expect(uiBalanceAfter).toBe(dbBalanceAfter);
+
+  expect(dbBalanceAfter).toBe(
+    dbBalanceBefore - transferData.amount
+  );
+
+  expect(recipientBalanceAfter).toBe(
+    recipientBalanceBefore + transferData.amount
+  );
+
+  // Confirm a transaction was recorded for this transfer.
+  // The existing helper matches the exact description, including ''.
+  const transaction = await getTransaction(
+    validUser.accountNumber,
+    transferData.recipientAccount,
+    transferData.amount,
+    ''
+  );
+
+  expect(transaction.from_account).toBe(validUser.accountNumber);
+  expect(transaction.to_account).toBe(transferData.recipientAccount);
+  expect(Number(transaction.amount)).toBe(transferData.amount);
+  expect(transaction.transaction_type).toBe('transfer');
+  expect(transaction.description).toBe('');
+});
+
+
+test('user can transfer money with special characters in the description', async ({ page }) => {
+  const loginPage = new LoginPage(page);
+  const navigation = new Navigation(page);
+  const transferPage = new TransferPage(page);
+  const disclaimer = new Disclaimer(page);
+
+  const description = 'Rent payment - October #2';
+
+  await loginPage.goto();
+  await loginPage.login(validUser.username, validUser.password);
+  await disclaimer.acknowledge();
+
+  const uiBalanceBefore = Number(
+    (await transferPage.balance.textContent())!.replace('$', '')
+  );
+
+  const dbBalanceBefore = await getUserBalance(validUser.accountNumber);
+  const recipientBalanceBefore = await getUserBalance(
+    transferData.recipientAccount
+  );
+
+  expect(uiBalanceBefore).toBe(dbBalanceBefore);
+
+  await navigation.goToMoneyTransfer();
+  await expect(transferPage.transferSection).toBeVisible();
+
+  await transferPage.sendMoney(
+    transferData.recipientAccount,
+    transferData.amount,
+    description
+  );
+
+  await expect(transferPage.transferSuccessToast).toBeVisible();
+
+  const uiBalanceAfter = Number(
+    (await transferPage.balance.textContent())!.replace('$', '')
+  );
+  const dbBalanceAfter = await getUserBalance(validUser.accountNumber);
+  const recipientBalanceAfter = await getUserBalance(
+    transferData.recipientAccount
+  );
+
+  expect(uiBalanceAfter).toBe(uiBalanceBefore - transferData.amount);
+  expect(uiBalanceAfter).toBe(dbBalanceAfter);
+  expect(dbBalanceAfter).toBe(dbBalanceBefore - transferData.amount);
+  expect(recipientBalanceAfter).toBe(
+    recipientBalanceBefore + transferData.amount
+  );
+
+  const transaction = await getTransaction(
+    validUser.accountNumber,
+    transferData.recipientAccount,
+    transferData.amount,
+    description
+  );
+
+  expect(transaction.from_account).toBe(validUser.accountNumber);
+  expect(transaction.to_account).toBe(transferData.recipientAccount);
+  expect(Number(transaction.amount)).toBe(transferData.amount);
+  expect(transaction.transaction_type).toBe('transfer');
+  expect(transaction.description).toBe(description);
+});
+
+
+test('user cannot inject SQL through the recipient account field', async ({ page }) => {
+  const loginPage = new LoginPage(page);
+  const navigation = new Navigation(page);
+  const transferPage = new TransferPage(page);
+  const disclaimer = new Disclaimer(page);
+
+  const maliciousRecipient = "' OR '1'='1' --";
+
+  await loginPage.goto();
+  await loginPage.login(sqlInjectionUser.username, sqlInjectionUser.password);
+  await disclaimer.acknowledge();
+
+  const senderBalanceBefore = await getUserBalance(
+    sqlInjectionUser.accountNumber
+  );
+  const recipientBalanceBefore = await getUserBalance(
+    transferData.recipientAccount
+  );
+
+  await navigation.goToMoneyTransfer();
+  await expect(transferPage.transferSection).toBeVisible();
+
+  await transferPage.sendMoney(
+    maliciousRecipient,
+    transferData.amount,
+    'SQL injection security test'
+  );
+
+  // The malicious input must not result in a successful transfer.
+  await expect(transferPage.transferSuccessToast).not.toBeVisible();
+
+  // Verify that neither account balance changed.
+  expect(
+    await getUserBalance(sqlInjectionUser.accountNumber)
+  ).toBe(senderBalanceBefore);
+
+  expect(
+    await getUserBalance(transferData.recipientAccount)
+  ).toBe(recipientBalanceBefore);
+});
+
+test('SQL injection-style recipient input must not debit the sender', async ({ page }) => {
+  const loginPage = new LoginPage(page);
+  const navigation = new Navigation(page);
+  const transferPage = new TransferPage(page);
+  const disclaimer = new Disclaimer(page);
+
+  const amount = 1;
+  const maliciousRecipient = "' OR '1'='1' --";
+  const description = `SQL injection regression ${Date.now()}`;
+
+  const senderBalanceBefore = await getUserBalance(
+    sqlInjectionUser.accountNumber
+  );
+
+  // Avoid a false pass caused by insufficient funds.
+  test.skip(
+    senderBalanceBefore < amount,
+    'Exact-balance test account needs at least 1 unit to run this test.'
+  );
+
+  const transactionCountBefore =
+    await getTransactionCountByDescription(description);
+
+  await loginPage.goto();
+  await loginPage.login(
+    sqlInjectionUser.username,
+    sqlInjectionUser.password
+  );
+  await disclaimer.acknowledge();
+
+  await navigation.goToMoneyTransfer();
+  await expect(transferPage.transferSection).toBeVisible();
+
+  const responsePromise = page.waitForResponse(
+    response =>
+      response.url().endsWith('/transfer') &&
+      response.request().method() === 'POST'
+  );
+
+  await transferPage.sendMoney(
+    maliciousRecipient,
+    amount,
+    description
+  );
+
+  const response = await responsePromise;
+  const responseBody = await response.json();
+
+  // These assertions should expose the current defect.
+  expect.soft(response.ok()).toBe(false);
+  expect.soft(responseBody.status).toBe('error');
+
+  const senderBalanceAfter = await getUserBalance(
+    sqlInjectionUser.accountNumber
+  );
+
+  const transactionCountAfter =
+    await getTransactionCountByDescription(description);
+
+  expect.soft(senderBalanceAfter).toBe(senderBalanceBefore);
+  expect.soft(transactionCountAfter).toBe(transactionCountBefore);
+});
+
+
+
+
+
+
+
 
 
 

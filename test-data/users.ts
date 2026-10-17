@@ -17,3 +17,8 @@ export const exactBalanceUser = {
   accountNumber: process.env.EXACT_BALANCE_TEST_ACCOUNT_NUMBER!,
 };
 
+export const sqlInjectionUser = {
+  username: process.env.SQL_INJECTION_TEST_USERNAME!,
+  password: process.env.SQL_INJECTION_TEST_PASSWORD!,
+  accountNumber: process.env.SQL_INJECTION_TEST_ACCOUNT_NUMBER!,
+};

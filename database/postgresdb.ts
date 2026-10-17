@@ -71,3 +71,23 @@ export async function getTransactionCountByDescription(
 
   return result.rows[0].count;
 }
+
+export async function getMatchingTransactionCount(
+  senderAccount: string,
+  recipientAccount: string,
+  amount: number,
+  description: string
+): Promise<number> {
+  const result = await pool.query(
+    `SELECT COUNT(*) AS count
+     FROM transactions
+     WHERE from_account = $1
+       AND to_account = $2
+       AND amount = $3
+       AND description = $4`,
+    [senderAccount, recipientAccount, amount, description]
+  );
+
+  return Number(result.rows[0].count);
+}
+
